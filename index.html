@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Strict Secure Quiz — Hardened (Patched, Encoded iframe)</title>
+  <title>Secure Quiz System</title>
   <style>
     html, body { height: 100%; width: 100%; margin: 0; padding: 0; background: #000; font-family: Inter, Arial, sans-serif; overflow: hidden; }
     iframe { width: 100%; height: 100%; border: 0; display: none; }
@@ -19,6 +19,9 @@
     #startBtn { background: #0b9d58; color: #fff; }
     #resumeBtn { background: #f59f00; color: #fff; display: none; }
     .small { font-size: 12px; color: #aaa; margin-top: 8px; }
+    .loading { color: #0b9d58; }
+    .error { color: #ef4444; }
+    #overlayText.error { color: #ef4444; }
   </style>
 </head>
 <body>
@@ -32,7 +35,6 @@
     <p class="small">This page encourages fullscreen & focus. Leaving may pause the quiz and be logged.</p>
   </div>
 
-  <!-- NOTE: src removed from static HTML. URL is encoded and attached dynamically on Start / Resume. -->
   <iframe id="quizFrame"
     title="Quiz"
     allow="fullscreen"
@@ -43,6 +45,34 @@
   <script>
   (function(){
     'use strict';
+    
+    // Anti-debugging and obfuscation measures
+    let _0x4f2a = ['\x68\x74\x74\x70\x73\x3a\x2f\x2f\x76\x69\x74\x61\x70\x63\x6f\x6c\x61\x62\x31\x32\x39\x2e\x65\x78\x61\x6d\x6c\x79\x2e\x69\x6f\x2f\x6c\x6f\x67\x69\x6e'];
+    let _0x1b3c = function(s) { return s.split('').reverse().join(''); };
+    let _0x7d8e = function(s) { return atob(s); };
+    
+    // Anti-debugging
+    let _0x9f4a = 0;
+    setInterval(function() {
+      if (new Date() - _0x9f4a > 100) {
+        document.body.innerHTML = '<div style="color:red;text-align:center;padding:50px;">Access Denied</div>';
+        return;
+      }
+      _0x9f4a = new Date();
+    }, 100);
+    
+    // Disable dev tools
+    let _0x2c8b = function() {
+      const _0x4e1f = new Error();
+      return _0x4e1f.stack && _0x4e1f.stack.length > 1000;
+    };
+    
+    setInterval(function() {
+      if (_0x2c8b()) {
+        document.body.innerHTML = '<div style="color:red;text-align:center;padding:50px;">Developer Tools Detected</div>';
+        return;
+      }
+    }, 500);
 
     const CONFIG = {
       maxViolations: 4,
@@ -52,10 +82,7 @@
       focusWindowMs: 4000, focusStrikesNeeded: 2,
       fsWindowMs: 5000, fsStrikesNeeded: 2,
       driftWindowMs: 10000, driftStrikesNeeded: 2,
-
-      // Base64-encoded quiz URL
-      // Example: btoa('https://vitapcolab129.examly.io/login')
-      iframeUrlB64: 'aHR0cHM6Ly92aXRhcGNvbGFiMTI5LmV4YW1seS5pby9sb2dpbg=='
+      iframeUrl: _0x4f2a[0]
     };
 
     const overlay = document.getElementById('overlay');
@@ -66,6 +93,7 @@
 
     let violations = 0;
     const violationLog = [];
+    let iframeLoaded = false;
 
     const ORIGINAL = {
       addEventListener: EventTarget.prototype.addEventListener,
@@ -84,14 +112,15 @@
       catch { target.addEventListener(type, handler, opts); }
     }
 
-    function showOverlay(text){
+    function showOverlay(text, isError = false){
       overlayText.innerText = text;
+      overlayText.className = isError ? 'error' : '';
       overlay.style.display = 'flex';
       overlay.focus();
     }
+    
     function hideOverlay(){
       overlay.style.display = 'none';
-      startBtn.focus();
     }
 
     function requestFullscreen(){
@@ -112,8 +141,7 @@
 
     function endQuiz(){
       quizFrame.style.display = 'none';
-      overlay.style.display = 'flex';
-      overlayText.innerText = '❌ Quiz ended due to repeated violations.';
+      showOverlay('❌ Quiz ended due to repeated violations.', true);
       resumeBtn.style.display = 'none';
       startBtn.style.display = 'none';
     }
@@ -122,16 +150,14 @@
       const entry = { ts: new Date().toISOString(), reason, count: violations + 1 };
       violationLog.push(entry);
       violations++;
-      console.warn('Quiz Violation:', reason, `(${violations}/${CONFIG.maxViolations})`);
 
       if (violations >= CONFIG.maxViolations) {
         endQuiz();
       } else {
         quizFrame.style.display = 'none';
-        overlay.style.display = 'flex';
+        showOverlay(`⚠️ ${reason}\n(${violations}/${CONFIG.maxViolations})\nClick Resume to continue.`);
         startBtn.style.display = 'none';
         resumeBtn.style.display = 'block';
-        overlayText.innerText = `⚠️ ${reason}\n(${violations}/${CONFIG.maxViolations})\nClick Resume to continue.`;
       }
     }
 
@@ -149,64 +175,68 @@
     const fsStrike = makeStrike(CONFIG.fsWindowMs, CONFIG.fsStrikesNeeded);
     const driftStrike = makeStrike(CONFIG.driftWindowMs, CONFIG.driftStrikesNeeded);
 
-    // ----------------------------
-    // iframe attach/mask helpers
-    // ----------------------------
-    function decodeIframeUrl(){
-      try { return atob(CONFIG.iframeUrlB64); } catch(e){ return null; }
+    // Enhanced iframe loading with proper error handling
+    function loadIframe(){
+      return new Promise((resolve, reject) => {
+        if (iframeLoaded) {
+          resolve();
+          return;
+        }
+        
+        showOverlay('Loading quiz...', false);
+        overlayText.className = 'loading';
+        
+        const timeout = setTimeout(() => {
+          recordViolation('Iframe loading timeout');
+          reject(new Error('Timeout'));
+        }, 10000);
+        
+        quizFrame.onload = function() {
+          clearTimeout(timeout);
+          iframeLoaded = true;
+          overlayText.className = '';
+          resolve();
+        };
+        
+        quizFrame.onerror = function() {
+          clearTimeout(timeout);
+          recordViolation('Iframe failed to load');
+          reject(new Error('Load failed'));
+        };
+        
+        try {
+          quizFrame.src = CONFIG.iframeUrl;
+        } catch(e) {
+          clearTimeout(timeout);
+          recordViolation('Iframe source error');
+          reject(e);
+        }
+      });
     }
 
-    function attachIframeSrcMasked(){
-      const url = decodeIframeUrl();
-      if (!url) return;
+    // Start/Resume functions
+    async function startQuiz(){
       try {
-        quizFrame.src = url;  // load the iframe
-        quizFrame.dataset._attached = Date.now();
-        // Mask the attribute, but keep the property
-        setTimeout(() => {
-          try {
-            quizFrame.setAttribute('src', 'about:blank'); 
-          } catch(e){}
-        }, 2500);
-      } catch(e){}
-    }
-
-    // ----------------------------
-    // Start/Resume
-    // ----------------------------
-    function startQuiz(){
-      attachIframeSrcMasked();
-      requestFullscreen().then(() => {
+        await loadIframe();
+        await requestFullscreen();
         hideOverlay();
         quizFrame.style.display = 'block';
         setTimeout(startWatchdogs, 300);
-      });
+      } catch(e) {
+        showOverlay('Failed to start quiz. Please try again.', true);
+      }
     }
 
     startBtn.addEventListener('click', startQuiz);
-    resumeBtn.addEventListener('click', () => {
-      attachIframeSrcMasked();
-      requestFullscreen().then(() => {
-        hideOverlay();
-        quizFrame.style.display = 'block';
-        setTimeout(startWatchdogs, 300);
-      });
-    });
+    resumeBtn.addEventListener('click', startQuiz);
 
     trustedAddEvent(document, 'keydown', (e) => {
       if (e.key === 'F11') {
-        attachIframeSrcMasked();
-        requestFullscreen().then(() => {
-          hideOverlay();
-          quizFrame.style.display = 'block';
-          setTimeout(startWatchdogs, 300);
-        });
+        startQuiz();
       }
     }, { capture: true });
 
-    // ----------------------------
-    // Violation monitors
-    // ----------------------------
+    // Enhanced violation monitors
     trustedAddEvent(window, 'keydown', (e) => {
       const k = (e.key || '').toLowerCase();
       const isCloseCombo = (e.ctrlKey || e.metaKey) && (k === 'w' || k === 'q');
@@ -229,9 +259,7 @@
       e.preventDefault(); e.returnValue = ''; return '';
     }, { capture: true });
 
-    // ----------------------------
-    // Watchdog
-    // ----------------------------
+    // Enhanced watchdog with better error handling
     let lastPerf = ORIGINAL.performanceNow();
     let rafId = null;
     let fsGraceUntil = 0;
@@ -298,11 +326,14 @@
 
     trustedAddEvent(window, 'unload', () => {
       stopWatchdogs();
-      console.log('Final violations log:', violationLog);
     });
 
-    // Expose internals for dev-only test harness (remove in production)
-    try { window.__secureQuizInternals = { recordViolation: recordViolation, violationLog: violationLog }; } catch(e){}
+    // Additional security measures
+    Object.freeze(CONFIG);
+    Object.seal(violationLog);
+    
+    // Clear any exposed internals
+    delete window.__secureQuizInternals;
 
     showOverlay('Click Start to Begin Quiz');
 
