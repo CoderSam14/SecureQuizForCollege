@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Strict Secure Quiz — Hardened (Patched, No Server, Encoded iframe)</title>
+  <title>Strict Secure Quiz — Hardened (Patched, Encoded iframe)</title>
   <style>
     html, body { height: 100%; width: 100%; margin: 0; padding: 0; background: #000; font-family: Inter, Arial, sans-serif; overflow: hidden; }
     iframe { width: 100%; height: 100%; border: 0; display: none; }
@@ -44,33 +44,17 @@
   (function(){
     'use strict';
 
-    /**********************************************************************
-     * Encoded-iframe version of your patched file
-     *
-     * - Removes static iframe src to make casual copy-paste harder.
-     * - Stores the iframe URL base64-encoded in CONFIG.iframeUrlB64.
-     * - Sets iframe.src only when user presses Start/Resume (short-lived),
-     *   then removes the attribute after a small delay to reduce static exposure.
-     *
-     * NOTE: This is obfuscation only. Determined users can still discover the
-     * URL at runtime (network panel, reading element.src while set, etc.).
-     **********************************************************************/
-
     const CONFIG = {
       maxViolations: 4,
       fullscreenRequired: true,
       fullscreenGraceMs: 3500,
       perfGapMs: 2000,
-      childHeartbeatRequired: false,
-      childHeartbeatTimeoutMs: 7000,
-      heartbeatIntervalMs: 2500,
       focusWindowMs: 4000, focusStrikesNeeded: 2,
       fsWindowMs: 5000, fsStrikesNeeded: 2,
       driftWindowMs: 10000, driftStrikesNeeded: 2,
 
-      // Put your quiz URL here, but base64-encoded.
-      // Example: btoa('https://vitapcolab129.examly.io/login') => 'aHR0cHM6Ly92aXRhcGNvbGFiMTI5LmV4YW1seS5pby9sb2dpbg=='
-      // Replace the string below with the actual base64 value you want to use.
+      // Base64-encoded quiz URL
+      // Example: btoa('https://vitapcolab129.examly.io/login')
       iframeUrlB64: 'aHR0cHM6Ly92aXRhcGNvbGFiMTI5LmV4YW1seS5pby9sb2dpbg=='
     };
 
@@ -166,27 +150,22 @@
     const driftStrike = makeStrike(CONFIG.driftWindowMs, CONFIG.driftStrikesNeeded);
 
     // ----------------------------
-    // iframe attach/detach helpers
+    // iframe attach/mask helpers
     // ----------------------------
     function decodeIframeUrl(){
       try { return atob(CONFIG.iframeUrlB64); } catch(e){ return null; }
     }
 
-    // Attach iframe.src only on intentional user action; remove attribute shortly after to reduce static exposure.
-    function attachIframeSrcShortLived(){
+    function attachIframeSrcMasked(){
       const url = decodeIframeUrl();
       if (!url) return;
       try {
-        // Set property to start navigation.
-        quizFrame.src = url;
+        quizFrame.src = url;  // load the iframe
         quizFrame.dataset._attached = Date.now();
-
-        // After a short delay, remove the src attribute and replace with a harmless placeholder attribute.
-        // Note: element.src property can still be read while script runs; this only reduces easy copy from "view-source" HTML.
+        // Mask the attribute, but keep the property
         setTimeout(() => {
           try {
-            quizFrame.removeAttribute('src');
-            quizFrame.setAttribute('data-src-hidden', 'attached');
+            quizFrame.setAttribute('src', 'about:blank'); 
           } catch(e){}
         }, 2500);
       } catch(e){}
@@ -196,7 +175,7 @@
     // Start/Resume
     // ----------------------------
     function startQuiz(){
-      attachIframeSrcShortLived();
+      attachIframeSrcMasked();
       requestFullscreen().then(() => {
         hideOverlay();
         quizFrame.style.display = 'block';
@@ -206,7 +185,7 @@
 
     startBtn.addEventListener('click', startQuiz);
     resumeBtn.addEventListener('click', () => {
-      attachIframeSrcShortLived();
+      attachIframeSrcMasked();
       requestFullscreen().then(() => {
         hideOverlay();
         quizFrame.style.display = 'block';
@@ -216,7 +195,7 @@
 
     trustedAddEvent(document, 'keydown', (e) => {
       if (e.key === 'F11') {
-        attachIframeSrcShortLived();
+        attachIframeSrcMasked();
         requestFullscreen().then(() => {
           hideOverlay();
           quizFrame.style.display = 'block';
@@ -225,6 +204,9 @@
       }
     }, { capture: true });
 
+    // ----------------------------
+    // Violation monitors
+    // ----------------------------
     trustedAddEvent(window, 'keydown', (e) => {
       const k = (e.key || '').toLowerCase();
       const isCloseCombo = (e.ctrlKey || e.metaKey) && (k === 'w' || k === 'q');
@@ -247,6 +229,9 @@
       e.preventDefault(); e.returnValue = ''; return '';
     }, { capture: true });
 
+    // ----------------------------
+    // Watchdog
+    // ----------------------------
     let lastPerf = ORIGINAL.performanceNow();
     let rafId = null;
     let fsGraceUntil = 0;
@@ -286,12 +271,7 @@
     }
 
     function startWatchdogs(){
-      if (!rafId) rafId = ORIGINAL.requestAnimationFrame(primaryWatchdogsBootstrap);
-    }
-
-    // small wrapper to avoid immediate reference to primaryWatchdogLoop before bootstrapping
-    function primaryWatchdogsBootstrap() {
-      primaryWatchdogLoop();
+      if (!rafId) rafId = ORIGINAL.requestAnimationFrame(primaryWatchdogLoop);
     }
 
     function stopWatchdogs(){
@@ -321,7 +301,7 @@
       console.log('Final violations log:', violationLog);
     });
 
-    // Expose internals for dev-only test harness (remove in production builds)
+    // Expose internals for dev-only test harness (remove in production)
     try { window.__secureQuizInternals = { recordViolation: recordViolation, violationLog: violationLog }; } catch(e){}
 
     showOverlay('Click Start to Begin Quiz');
