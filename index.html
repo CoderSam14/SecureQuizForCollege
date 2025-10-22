@@ -2,60 +2,78 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Strict Secure Quiz — Hardened</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Strict Secure Quiz — Hardened (Patched, No Server, Encoded iframe)</title>
   <style>
-    html,body{height:100%;width:100%;margin:0;padding:0;background:#000;font-family:Inter, Arial, sans-serif;overflow:hidden}
-    iframe{width:100%;height:100%;border:0;display:none}
-    #overlay{
-      position:fixed;inset:0;background:#000;z-index:99999;display:flex;flex-direction:column;
-      justify-content:center;align-items:center;color:#fff;padding:24px;text-align:center;
+    html, body { height: 100%; width: 100%; margin: 0; padding: 0; background: #000; font-family: Inter, Arial, sans-serif; overflow: hidden; }
+    iframe { width: 100%; height: 100%; border: 0; display: none; }
+    #overlay {
+      position: fixed; inset: 0; background: #000; z-index: 99999; display: flex; flex-direction: column;
+      justify-content: center; align-items: center; color: #fff; padding: 24px; text-align: center; outline: none;
     }
-    #overlay h1{margin:0 0 12px;font-size:22px}
-    #overlay p{margin:8px 0;color:#ddd}
-    button{
-      font-size:16px;padding:12px 20px;border-radius:10px;border:0;cursor:pointer;margin:8px;
-    }
-    #startBtn{background:#0b9d58;color:#fff}
-    #resumeBtn{background:#f59f00;color:#fff;display:none}
-    .small{font-size:12px;color:#aaa;margin-top:8px}
+    #overlay:focus { outline: 2px solid #0b9d58; outline-offset: -2px; }
+    #overlay h1 { margin: 0 0 12px; font-size: 22px; }
+    #overlay p { margin: 8px 0; color: #ddd; }
+    button { font-size: 16px; padding: 12px 20px; border-radius: 10px; border: 0; cursor: pointer; margin: 8px; }
+    button:focus { outline: 2px solid #fff; outline-offset: 2px; }
+    #startBtn { background: #0b9d58; color: #fff; }
+    #resumeBtn { background: #f59f00; color: #fff; display: none; }
+    .small { font-size: 12px; color: #aaa; margin-top: 8px; }
   </style>
 </head>
 <body>
 
-  <div id="overlay" role="dialog" aria-modal="true">
+  <div id="overlay" role="dialog" aria-modal="true" aria-labelledby="overlayText" aria-live="assertive" tabindex="-1">
     <h1 id="overlayText">Click Start to Begin Quiz</h1>
     <div>
-      <button id="startBtn">Start Quiz</button>
-      <button id="resumeBtn">Resume Quiz</button>
+      <button id="startBtn" autofocus>Start Quiz</button>
+      <button id="resumeBtn" style="display:none">Resume Quiz</button>
     </div>
-    <p class="small">This page enforces fullscreen & focus. Leaving the quiz or tampering will be recorded.</p>
+    <p class="small">This page encourages fullscreen & focus. Leaving may pause the quiz and be logged.</p>
   </div>
 
-  <iframe id="quizFrame" src="https://vitapcolab129.examly.io/login" title="Quiz"></iframe>
+  <!-- NOTE: src removed from static HTML. URL is encoded and attached dynamically on Start / Resume. -->
+  <iframe id="quizFrame"
+    title="Quiz"
+    allow="fullscreen"
+    sandbox="allow-forms allow-scripts allow-same-origin"
+    style="display:none;width:100%;height:100%;border:0"
+  ></iframe>
 
   <script>
   (function(){
     'use strict';
 
     /**********************************************************************
-     * Hardened Secure Quiz Wrapper
+     * Encoded-iframe version of your patched file
      *
-     * Design highlights:
-     * - Bind originals early to resist overrides (document.hasFocus, rAF, addEventListener)
-     * - Use rAF watchdog (cannot be cleared with clearInterval)
-     * - Use multiple independent checks: hasFocus, visibilityState, fullscreen, perf drift
-     * - Detect tampering (if core APIs differ from originals)
-     * - Handle macOS, Linux, and Windows specific combos
-     * - Enhanced cross-platform fullscreen support
+     * - Removes static iframe src to make casual copy-paste harder.
+     * - Stores the iframe URL base64-encoded in CONFIG.iframeUrlB64.
+     * - Sets iframe.src only when user presses Start/Resume (short-lived),
+     *   then removes the attribute after a small delay to reduce static exposure.
      *
-     * NOTE: defensive code can't be perfect (attackers with full client control can still tamper),
-     * but layered, redundant checks raise the bar substantially.
+     * NOTE: This is obfuscation only. Determined users can still discover the
+     * URL at runtime (network panel, reading element.src while set, etc.).
      **********************************************************************/
 
-    // -------------------------
-    // Basic UI & state
-    // -------------------------
+    const CONFIG = {
+      maxViolations: 4,
+      fullscreenRequired: true,
+      fullscreenGraceMs: 3500,
+      perfGapMs: 2000,
+      childHeartbeatRequired: false,
+      childHeartbeatTimeoutMs: 7000,
+      heartbeatIntervalMs: 2500,
+      focusWindowMs: 4000, focusStrikesNeeded: 2,
+      fsWindowMs: 5000, fsStrikesNeeded: 2,
+      driftWindowMs: 10000, driftStrikesNeeded: 2,
+
+      // Put your quiz URL here, but base64-encoded.
+      // Example: btoa('https://vitapcolab129.examly.io/login') => 'aHR0cHM6Ly92aXRhcGNvbGFiMTI5LmV4YW1seS5pby9sb2dpbg=='
+      // Replace the string below with the actual base64 value you want to use.
+      iframeUrlB64: 'aHR0cHM6Ly92aXRhcGNvbGFiMTI5LmV4YW1seS5pby9sb2dpbg=='
+    };
+
     const overlay = document.getElementById('overlay');
     const overlayText = document.getElementById('overlayText');
     const startBtn = document.getElementById('startBtn');
@@ -63,45 +81,8 @@
     const quizFrame = document.getElementById('quizFrame');
 
     let violations = 0;
-    const maxViolations = 4;
     const violationLog = [];
 
-    function showOverlay(text){
-      overlayText.innerText = text;
-      overlay.style.display = 'flex';
-    }
-    function hideOverlay(){
-      overlay.style.display = 'none';
-    }
-
-    function endQuiz(){
-      quizFrame.style.display = 'none';
-      overlay.style.display = 'flex';
-      overlayText.innerText = '❌ Quiz ended due to repeated violations.';
-      resumeBtn.style.display = 'none';
-      startBtn.style.display = 'none';
-      // Session ended due to violations - logged locally.
-    }
-
-    function recordViolation(reason){
-      violations++;
-      const ts = new Date().toISOString();
-      violationLog.push({ts, reason});
-      console.warn('Quiz Violation:', reason, '(', violations, '/', maxViolations, ')');
-      // Log violation locally (server communication removed)
-      if(violations >= maxViolations) endQuiz();
-      else {
-        quizFrame.style.display = 'none';
-        overlay.style.display = 'flex';
-        startBtn.style.display = 'none';
-        resumeBtn.style.display = 'block';
-        overlayText.innerText = `⚠️ ${reason}\n(${violations}/${maxViolations})\nClick Resume to continue.`;
-      }
-    }
-
-    // -------------------------
-    // Bind original references immediately
-    // -------------------------
     const ORIGINAL = {
       addEventListener: EventTarget.prototype.addEventListener,
       removeEventListener: EventTarget.prototype.removeEventListener,
@@ -114,339 +95,238 @@
                        () => document.visibilityState,
     };
 
-    // Mark that originals were captured (tamper-evidence)
-    try{ Object.defineProperty(window, '__quizSecureMarker', {value:true, configurable:false, writable:false}); }catch(e){}
-
-    // -------------------------
-    // Defensive helpers
-    // -------------------------
-
-    // Use original addEventListener to attach trusted handlers (so user cannot override later)
     function trustedAddEvent(target, type, handler, opts){
-      try{
-        ORIGINAL.addEventListener.call(target, type, handler, opts);
-      }catch(e){
-        // fallback
-        target.addEventListener(type, handler, opts);
-      }
+      try { ORIGINAL.addEventListener.call(target, type, handler, opts); }
+      catch { target.addEventListener(type, handler, opts); }
     }
 
+    function showOverlay(text){
+      overlayText.innerText = text;
+      overlay.style.display = 'flex';
+      overlay.focus();
+    }
+    function hideOverlay(){
+      overlay.style.display = 'none';
+      startBtn.focus();
+    }
 
-    // -------------------------
-    // Enhanced fullscreen helper for cross-platform compatibility
-    // -------------------------
-    function requestFullscreen() {
+    function requestFullscreen(){
       const el = document.documentElement;
-      // Enhanced fullscreen API detection for better cross-platform support
-      const rfs = el.requestFullscreen || 
-                  el.webkitRequestFullscreen || 
-                  el.mozRequestFullScreen || 
-                  el.msRequestFullscreen ||
-                  el.webkitEnterFullscreen; // Safari mobile
-      
-      if (rfs) {
-        return rfs.call(el).catch((err) => {
-          console.warn('Fullscreen request failed:', err);
-          // Don't fail the quiz if fullscreen fails
-        });
-      }
+      const rfs = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen || el.webkitEnterFullscreen;
+      if (rfs) return Promise.resolve(rfs.call(el)).catch(() => {});
       return Promise.resolve();
     }
 
-    // -------------------------
-    // Start/Resume handlers
-    // -------------------------
-    function startQuiz(){
-      // Attempt to harden environment in case something tries to mutate later
-      initializeTamperWatch();
+    function isBrowserUIFullscreen(){
+      return Math.abs(window.innerHeight - screen.availHeight) <= 1 && Math.abs(window.innerWidth - screen.availWidth) <= 1;
+    }
 
+    function ensureFullscreen(){
+      const fsEl = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement || null;
+      return !!fsEl || isBrowserUIFullscreen();
+    }
+
+    function endQuiz(){
+      quizFrame.style.display = 'none';
+      overlay.style.display = 'flex';
+      overlayText.innerText = '❌ Quiz ended due to repeated violations.';
+      resumeBtn.style.display = 'none';
+      startBtn.style.display = 'none';
+    }
+
+    function recordViolation(reason){
+      const entry = { ts: new Date().toISOString(), reason, count: violations + 1 };
+      violationLog.push(entry);
+      violations++;
+      console.warn('Quiz Violation:', reason, `(${violations}/${CONFIG.maxViolations})`);
+
+      if (violations >= CONFIG.maxViolations) {
+        endQuiz();
+      } else {
+        quizFrame.style.display = 'none';
+        overlay.style.display = 'flex';
+        startBtn.style.display = 'none';
+        resumeBtn.style.display = 'block';
+        overlayText.innerText = `⚠️ ${reason}\n(${violations}/${CONFIG.maxViolations})\nClick Resume to continue.`;
+      }
+    }
+
+    function makeStrike(windowMs, needStrikes){
+      const buf = [];
+      return function(){
+        const now = Date.now();
+        buf.push(now);
+        while (buf.length && now - buf[0] > windowMs) buf.shift();
+        return buf.length >= needStrikes;
+      };
+    }
+
+    const focusStrike = makeStrike(CONFIG.focusWindowMs, CONFIG.focusStrikesNeeded);
+    const fsStrike = makeStrike(CONFIG.fsWindowMs, CONFIG.fsStrikesNeeded);
+    const driftStrike = makeStrike(CONFIG.driftWindowMs, CONFIG.driftStrikesNeeded);
+
+    // ----------------------------
+    // iframe attach/detach helpers
+    // ----------------------------
+    function decodeIframeUrl(){
+      try { return atob(CONFIG.iframeUrlB64); } catch(e){ return null; }
+    }
+
+    // Attach iframe.src only on intentional user action; remove attribute shortly after to reduce static exposure.
+    function attachIframeSrcShortLived(){
+      const url = decodeIframeUrl();
+      if (!url) return;
+      try {
+        // Set property to start navigation.
+        quizFrame.src = url;
+        quizFrame.dataset._attached = Date.now();
+
+        // After a short delay, remove the src attribute and replace with a harmless placeholder attribute.
+        // Note: element.src property can still be read while script runs; this only reduces easy copy from "view-source" HTML.
+        setTimeout(() => {
+          try {
+            quizFrame.removeAttribute('src');
+            quizFrame.setAttribute('data-src-hidden', 'attached');
+          } catch(e){}
+        }, 2500);
+      } catch(e){}
+    }
+
+    // ----------------------------
+    // Start/Resume
+    // ----------------------------
+    function startQuiz(){
+      attachIframeSrcShortLived();
       requestFullscreen().then(() => {
         hideOverlay();
         quizFrame.style.display = 'block';
-        // Quiz started - logging locally
+        setTimeout(startWatchdogs, 300);
       });
     }
 
     startBtn.addEventListener('click', startQuiz);
     resumeBtn.addEventListener('click', () => {
+      attachIframeSrcShortLived();
       requestFullscreen().then(() => {
         hideOverlay();
         quizFrame.style.display = 'block';
+        setTimeout(startWatchdogs, 300);
       });
     });
 
-    // -------------------------
-    // Key combos: disable common close/dev keys and detect attempts
-    // Enhanced for Mac, Linux, and Windows compatibility
-    // -------------------------
-    trustedAddEvent(window, 'keydown', (e) => {
-      // Enhanced platform detection
-      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0 || 
-                   navigator.userAgent.toUpperCase().indexOf('MAC') >= 0;
-      const isLinux = navigator.platform.toUpperCase().indexOf('LINUX') >= 0 ||
-                     navigator.userAgent.toUpperCase().indexOf('LINUX') >= 0;
-      
-      // Detect attempts to close tab/window (cross-platform)
-      if ((isMac && e.metaKey && (e.key === 'w' || e.key === 'W' || e.key === 'q' || e.key === 'Q')) ||
-          ((!isMac && !isLinux) && ((e.ctrlKey && (e.key === 'w' || e.key === 'W')) || e.key === 'F4')) ||
-          (isLinux && e.ctrlKey && (e.key === 'w' || e.key === 'W' || e.key === 'q' || e.key === 'Q'))) {
-        e.preventDefault();
-        e.stopPropagation();
-        recordViolation('Attempted close (keyboard shortcut detected)');
-        return false;
-      }
-
-      // Block devtools combos (enhanced for all platforms)
-      if (e.key === 'F12' || 
-          (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'J' || e.key === 'C' || e.key === 'K')) ||
-          (isMac && e.metaKey && e.altKey && e.key === 'I') ||
-          (isLinux && e.ctrlKey && e.shiftKey && e.key === 'I') ||
-          (e.ctrlKey && e.key === 'U') || // View source
-          (isMac && e.metaKey && e.key === 'U')) { // Mac view source
-        e.preventDefault();
-        e.stopPropagation();
-        recordViolation('Attempt to open developer tools detected');
-        return false;
-      }
-    }, {capture:true});
-
-    // Disable context menu
-    trustedAddEvent(document, 'contextmenu', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      recordViolation('Right-click/context menu attempt');
-      return false;
-    }, {capture:true});
-
-    // -------------------------
-    // beforeunload: detect close attempts
-    // -------------------------
-    trustedAddEvent(window, 'beforeunload', function(e){
-      // Give the user a chance but mark it as violation
-      recordViolation('Attempted to close window (beforeunload event)');
-      // Standard beforeunload UX: show confirmation
-      e.preventDefault();
-      e.returnValue = '';
-      return '';
-    }, {capture:true});
-
-    // -------------------------
-    // Watchdog: rAF loop (primary)
-    // - Uses bound original functions to resist overrides
-    // -------------------------
-    let lastPerf = ORIGINAL.performanceNow();
-    let perfTickCount = 0;
-    let rafId = null;
-
-    function primaryWatchdogLoop(){
-      try{
-        // 1) Focus check (use original bound function)
-        const focused = ORIGINAL.hasFocus();
-        if (!focused && quizFrame.style.display === 'block') {
-          recordViolation('Window lost focus (document.hasFocus returned false).');
-        }
-
-        // 2) Visibility check (try multiple signals)
-        const visHidden = (typeof document.hidden === 'boolean') ? document.hidden : (ORIGINAL.visibilityState ? ORIGINAL.visibilityState() !== 'visible' : false);
-        const visState = (document.visibilityState || (ORIGINAL.visibilityState ? ORIGINAL.visibilityState() : 'visible'));
-        if ((visHidden || visState !== 'visible') && quizFrame.style.display === 'block') {
-          recordViolation('Tab not visible (visibilityState/hidden reported non-visible).');
-        }
-
-        // 3) Enhanced fullscreen exit check (cross-platform)
-        const fsEl = document.fullscreenElement || 
-                    document.webkitFullscreenElement || 
-                    document.mozFullScreenElement ||
-                    document.msFullscreenElement || 
-                    null;
-        if (!fsEl && quizFrame.style.display === 'block') {
-          recordViolation('Fullscreen exit detected.');
-        }
-
-        // 4) Performance drift detection (background tabs throttle timers)
-        const now = ORIGINAL.performanceNow();
-        const delta = now - lastPerf;
-        // if delta >> expected (rAF runs ~60fps; but we check for large gaps)
-        if (delta > 2000 && quizFrame.style.display === 'block') {
-          recordViolation('Large performance/time gap detected (possible backgrounding).');
-        }
-        lastPerf = now;
-      }catch(err){
-        // If core APIs throw, treat as tampering
-        recordViolation('Watchdog error (possible tampering detected).');
-      }
-
-      // Schedule next loop via original rAF
-      rafId = ORIGINAL.requestAnimationFrame(primaryWatchdogLoop);
-    }
-
-    // Start rAF watchdog but only after quiz started (we'll start when quiz is resumed)
-    function startWatchdogs(){
-      if (!rafId) rafId = ORIGINAL.requestAnimationFrame(primaryWatchdogLoop);
-      // Also start a longer interval heartbeat that uses original perf to detect timer clear attempts
-      if (!window.__quizIntervalToken) {
-        window.__quizIntervalToken = setInterval(() => {
-          try {
-            // Check whether the original addEventListener was replaced
-            if (EventTarget.prototype.addEventListener !== ORIGINAL.addEventListener) {
-              recordViolation('EventTarget.prototype.addEventListener was modified (tampering).');
-            }
-            if (document.hasFocus !== ORIGINAL.hasFocus && typeof document.hasFocus === 'function') {
-              // someone replaced document.hasFocus — call original bound to detect difference
-              if (!ORIGINAL.hasFocus()) recordViolation('document.hasFocus has been tampered with.');
-            }
-          } catch(e) {
-            recordViolation('Interval watchdog error.');
-          }
-        }, 1200);
-      }
-
-    }
-
-    // Stop watchdogs (used when ending quiz)
-    function stopWatchdogs(){
-      try{
-        if (rafId && ORIGINAL.cancelAnimationFrame) ORIGINAL.cancelAnimationFrame(rafId);
-      }catch(e){}
-      try{
-        if (window.__quizIntervalToken) { clearInterval(window.__quizIntervalToken); window.__quizIntervalToken = null; }
-      }catch(e){}
-    }
-
-    // Start watchdogs when quiz is shown
-    const origStart = startQuiz;
-    // We already added start handler — startWatchdogs in startQuiz via wrapper:
-    startBtn.addEventListener('click', () => {
-      // small delay to ensure fullscreen request handled
-      setTimeout(() => startWatchdogs(), 300);
-    });
-
-    resumeBtn.addEventListener('click', () => {
-      setTimeout(() => startWatchdogs(), 300);
-    });
-
-    // If iframe is visible (user started), ensure watchdogs running
-    // Hook into visibilitychange and fullscreenchange using the trustedAddEvent
-    trustedAddEvent(document, 'visibilitychange', () => {
-      // If page becomes hidden while quiz running, immediately count
-      if (document.hidden && quizFrame.style.display === 'block') {
-        recordViolation('visibilitychange: document.hidden became true');
-      }
-    }, {capture:true});
-
-    // Enhanced fullscreen change detection for cross-platform support
-    const fullscreenEvents = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'];
-    fullscreenEvents.forEach(eventType => {
-      trustedAddEvent(document, eventType, () => {
-        const fsEl = document.fullscreenElement || 
-                    document.webkitFullscreenElement || 
-                    document.mozFullScreenElement ||
-                    document.msFullscreenElement;
-        if (!fsEl && quizFrame.style.display === 'block') {
-          recordViolation('fullscreenchange: exited fullscreen');
-        }
-      }, {capture:true});
-    });
-
-    // -------------------------
-    // Tamper-evidence integrity check (lightweight)
-    // - Compute a short fingerprint of the inline script block (best-effort).
-    // - Show a log entry if the script text differs from the moment of load.
-    // -------------------------
-    (function tamperFingerprint(){
-      try {
-        // Attempt to find the script element that includes this code.
-        const scripts = Array.from(document.getElementsByTagName('script'));
-        // Heuristic: find a script that contains "Hardened Secure Quiz" comment above.
-        const mine = scripts.find(s => s.textContent && s.textContent.indexOf('Hardened Secure Quiz') !== -1);
-        if (!mine) return;
-        const text = mine.textContent.trim();
-        // compute a simple hash using SubtleCrypto (sha-256)
-        if (window.crypto && crypto.subtle) {
-          const encoder = new TextEncoder();
-          crypto.subtle.digest('SHA-256', encoder.encode(text)).then(hashBuffer => {
-            const hashArray = Array.from(new Uint8Array(hashBuffer));
-            const hashHex = hashArray.map(b => b.toString(16).padStart(2,'0')).join('');
-            // Save initial fingerprint in a non-writable place
-            try {
-              Object.defineProperty(window, '__quizScriptFingerprint', {value:hashHex, configurable:false, writable:false});
-            }catch(e){}
-          }).catch(()=>{});
-        }
-      } catch(e){}
-    })();
-
-    // Periodically check fingerprint hasn't changed (tamper-evidence)
-    setInterval(() => {
-      try{
-        if (!window.__quizScriptFingerprint) return;
-        const scripts = Array.from(document.getElementsByTagName('script'));
-        const mine = scripts.find(s => s.textContent && s.textContent.indexOf('Hardened Secure Quiz') !== -1);
-        if (!mine) return;
-        const text = mine.textContent.trim();
-        if (window.crypto && crypto.subtle) {
-          const encoder = new TextEncoder();
-          crypto.subtle.digest('SHA-256', encoder.encode(text)).then(hashBuffer => {
-            const hashArray = Array.from(new Uint8Array(hashBuffer));
-            const hashHex = hashArray.map(b => b.toString(16).padStart(2,'0')).join('');
-            if (hashHex !== window.__quizScriptFingerprint) {
-              recordViolation('Script fingerprint changed (possible tampering).');
-            }
-          }).catch(()=>{});
-        }
-      }catch(e){}
-    }, 5000);
-
-    // -------------------------
-    // Defensive initializers: protect against lazy overrides
-    // -------------------------
-    function initializeTamperWatch(){
-      try{
-        // Make sure critical originals still point to captured ones
-        if (EventTarget.prototype.addEventListener !== ORIGINAL.addEventListener) {
-          // Rebind addEventListener to original under a safe property to use for trusted attachments
-          try { EventTarget.prototype.addEventListener = ORIGINAL.addEventListener; } catch(e){}
-        }
-      }catch(e){}
-      // Start watchdogs
-      startWatchdogs();
-    }
-
-    // Provide a UI-safe resume flow when user clicks Resume (already wired above).
-    // Show initial overlay until the user starts.
-    showOverlay('Click Start to Begin Quiz');
-
-    // -------------
-    // Utility: hide the overlay if user starts full-screen with F11 or browser UI
-    // -------------
     trustedAddEvent(document, 'keydown', (e) => {
       if (e.key === 'F11') {
-        // Attempt to start fullscreen then hide overlay
+        attachIframeSrcShortLived();
         requestFullscreen().then(() => {
           hideOverlay();
           quizFrame.style.display = 'block';
+          setTimeout(startWatchdogs, 300);
         });
       }
+    }, { capture: true });
+
+    trustedAddEvent(window, 'keydown', (e) => {
+      const k = (e.key || '').toLowerCase();
+      const isCloseCombo = (e.ctrlKey || e.metaKey) && (k === 'w' || k === 'q');
+      const isDevTools = e.key === 'F12' || (e.ctrlKey && e.shiftKey && ['i','j','c','k'].includes(k)) || (e.ctrlKey && k === 'u') || (e.metaKey && e.altKey && k === 'i');
+      if (isCloseCombo || isDevTools) {
+        e.preventDefault(); e.stopPropagation();
+        recordViolation(isCloseCombo ? 'Attempted close (keyboard shortcut)' : 'Attempt to open developer tools');
+        return false;
+      }
+    }, { capture: true });
+
+    trustedAddEvent(document, 'contextmenu', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      recordViolation('Right-click/context menu attempt');
+      return false;
+    }, { capture: true });
+
+    trustedAddEvent(window, 'beforeunload', (e) => {
+      recordViolation('Attempted to close or reload window');
+      e.preventDefault(); e.returnValue = ''; return '';
+    }, { capture: true });
+
+    let lastPerf = ORIGINAL.performanceNow();
+    let rafId = null;
+    let fsGraceUntil = 0;
+
+    function primaryWatchdogLoop(){
+      try {
+        const focused = ORIGINAL.hasFocus();
+        if (!focused && quizFrame.style.display === 'block') {
+          if (focusStrike()) recordViolation('Window lost focus');
+        }
+
+        const visHidden = (typeof document.hidden === 'boolean') ? document.hidden : (ORIGINAL.visibilityState ? ORIGINAL.visibilityState() !== 'visible' : false);
+        const visState = document.visibilityState || (ORIGINAL.visibilityState ? ORIGINAL.visibilityState() : 'visible');
+        if ((visHidden || visState !== 'visible') && quizFrame.style.display === 'block') {
+          if (focusStrike()) recordViolation('Tab not visible');
+        }
+
+        if (!ensureFullscreen() && quizFrame.style.display === 'block') {
+          if (!fsGraceUntil) fsGraceUntil = Date.now() + CONFIG.fullscreenGraceMs;
+          if (CONFIG.fullscreenRequired && Date.now() > fsGraceUntil) {
+            if (fsStrike()) recordViolation('Fullscreen not active');
+          }
+        } else {
+          fsGraceUntil = 0;
+        }
+
+        const now = ORIGINAL.performanceNow();
+        const delta = now - lastPerf;
+        if (delta > CONFIG.perfGapMs && quizFrame.style.display === 'block') {
+          if (driftStrike()) recordViolation('Large performance gap (possible backgrounding)');
+        }
+        lastPerf = now;
+      } catch (err) {
+        recordViolation('Watchdog error (possible tampering)');
+      }
+      rafId = ORIGINAL.requestAnimationFrame(primaryWatchdogLoop);
+    }
+
+    function startWatchdogs(){
+      if (!rafId) rafId = ORIGINAL.requestAnimationFrame(primaryWatchdogsBootstrap);
+    }
+
+    // small wrapper to avoid immediate reference to primaryWatchdogLoop before bootstrapping
+    function primaryWatchdogsBootstrap() {
+      primaryWatchdogLoop();
+    }
+
+    function stopWatchdogs(){
+      try { if (rafId && ORIGINAL.cancelAnimationFrame) ORIGINAL.cancelAnimationFrame(rafId); } catch {}
+      rafId = null;
+    }
+
+    trustedAddEvent(document, 'visibilitychange', () => {
+      if (document.hidden && quizFrame.style.display === 'block') {
+        if (focusStrike()) recordViolation('document became hidden');
+      }
+    }, { capture: true });
+
+    ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach(evt => {
+      trustedAddEvent(document, evt, () => {
+        if (!ensureFullscreen() && quizFrame.style.display === 'block') {
+          if (CONFIG.fullscreenRequired) {
+            if (!fsGraceUntil) fsGraceUntil = Date.now() + CONFIG.fullscreenGraceMs;
+            if (Date.now() > fsGraceUntil && fsStrike()) recordViolation('Exited fullscreen');
+          }
+        }
+      }, { capture: true });
     });
 
-    // On page unload, stop watchdogs gracefully
     trustedAddEvent(window, 'unload', () => {
       stopWatchdogs();
+      console.log('Final violations log:', violationLog);
     });
 
-    // Expose internals for debugging in dev only (comment out in production)
-    try{
-      Object.defineProperty(window, '__secureQuizInternals', {
-        value: {ORIGINAL, recordViolation, violationLog},
-        configurable: true, writable: false
-      });
-    }catch(e){}
+    // Expose internals for dev-only test harness (remove in production builds)
+    try { window.__secureQuizInternals = { recordViolation: recordViolation, violationLog: violationLog }; } catch(e){}
 
-    // Final note: startWatchdogs if an auto-start policy is used by your institution.
-    // startWatchdogs();
+    showOverlay('Click Start to Begin Quiz');
 
   })();
   </script>
-
 </body>
 </html>
