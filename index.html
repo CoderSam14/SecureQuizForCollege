@@ -1,8 +1,9 @@
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Strict Secure Quiz — Hardened</title>
+  <title>Strict Secure Quiz — Hardened (Stable)</title>
   <style>
     html,body{height:100%;width:100%;margin:0;padding:0;background:#000;font-family:Inter, Arial, sans-serif;overflow:hidden}
     iframe{width:100%;height:100%;border:0;display:none}
@@ -18,11 +19,18 @@
     #startBtn{background:#0b9d58;color:#fff}
     #resumeBtn{background:#f59f00;color:#fff;display:none}
     .small{font-size:12px;color:#aaa;margin-top:8px}
+
+    /* Non-destructive UX hardening */
+    * { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent }
+    body { -webkit-user-drag:none; user-drag:none }
+    ::-webkit-scrollbar{display:none}
+    ::selection{background:transparent} ::-moz-selection{background:transparent}
+    img{ -webkit-user-drag:none; user-drag:none; pointer-events:none }
   </style>
 </head>
 <body>
 
-  <div id="overlay" role="dialog" aria-modal="true">
+  <div id="overlay" role="dialog" aria-modal="true" aria-labelledby="overlayText">
     <h1 id="overlayText">Click Start to Begin Quiz</h1>
     <div>
       <button id="startBtn">Start Quiz</button>
@@ -38,23 +46,12 @@
     'use strict';
 
     /**********************************************************************
-     * Hardened Secure Quiz Wrapper
-     *
-     * Design highlights:
-     * - Bind originals early to resist overrides (document.hasFocus, rAF, addEventListener)
-     * - Use rAF watchdog (cannot be cleared with clearInterval)
-     * - Use multiple independent checks: hasFocus, visibilityState, fullscreen, perf drift
-     * - Detect tampering (if core APIs differ from originals)
-     * - Handle macOS, Linux, and Windows specific combos
-     * - Enhanced cross-platform fullscreen support
-     *
-     * NOTE: defensive code can't be perfect (attackers with full client control can still tamper),
-     * but layered, redundant checks raise the bar substantially.
+     * Stable hardened wrapper
+     * - Replaces blocking `debugger;` with non-blocking timing heuristics
+     * - Keeps watchdogs and tamper-evidence but avoids breaking runtime
      **********************************************************************/
 
-    // -------------------------
-    // Basic UI & state
-    // -------------------------
+    // ===== Basic UI & state
     const overlay = document.getElementById('overlay');
     const overlayText = document.getElementById('overlayText');
     const startBtn = document.getElementById('startBtn');
@@ -66,384 +63,280 @@
     const violationLog = [];
 
     function showOverlay(text){
-      overlayText.innerText = text;
+      if (text) overlayText.innerText = text;
       overlay.style.display = 'flex';
     }
     function hideOverlay(){
       overlay.style.display = 'none';
     }
-
     function endQuiz(){
-      overlayText.innerText = '❌ Quiz ended due to repeated violations.';
+      quizFrame.style.display = 'none';
+      showOverlay('❌ Quiz ended due to repeated violations.');
       resumeBtn.style.display = 'none';
       startBtn.style.display = 'none';
-      // Session ended due to violations - logged locally.
+      stopWatchdogs();
     }
-
     function recordViolation(reason){
-      violations++;
-      const ts = new Date().toISOString();
-      violationLog.push({ts, reason});
-      console.warn('Quiz Violation:', reason, '(', violations, '/', maxViolations, ')');
-      // Log violation locally (server communication removed)
-      if(violations >= maxViolations) endQuiz();
-      else {
-        quizFrame.style.display = 'none';
-        overlay.style.display = 'flex';
-        startBtn.style.display = 'none';
-        resumeBtn.style.display = 'block';
-        overlayText.innerText = `⚠️ ${reason}\n(${violations}/${maxViolations})\nClick Resume to continue.`;
+      try {
+        violations++;
+        const ts = new Date().toISOString();
+        violationLog.push({ts, reason});
+        console.warn('Quiz Violation:', reason, `(${violations}/${maxViolations})`);
+      } catch(e){}
+      if (violations >= maxViolations) {
+        endQuiz();
+      } else {
+        try {
+          quizFrame.style.display = 'none';
+          showOverlay(`⚠️ ${reason}\n(${violations}/${maxViolations})\nClick Resume to continue.`);
+          startBtn.style.display = 'none';
+          resumeBtn.style.display = 'inline-block';
+        } catch(e){}
       }
     }
 
-    // -------------------------
-    // Bind original references immediately
-    // -------------------------
+    // ===== Bind originals early
     const ORIGINAL = {
       addEventListener: EventTarget.prototype.addEventListener,
       removeEventListener: EventTarget.prototype.removeEventListener,
       hasFocus: document.hasFocus.bind(document),
       requestAnimationFrame: window.requestAnimationFrame.bind(window),
       cancelAnimationFrame: window.cancelAnimationFrame ? window.cancelAnimationFrame.bind(window) : null,
-      performanceNow: performance && performance.now ? performance.now.bind(performance) : () => Date.now(),
-      visibilityState: Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState') ?
-                       Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState').get.bind(document) :
-                       () => document.visibilityState,
+      performanceNow: (performance && performance.now) ? performance.now.bind(performance) : Date.now.bind(Date),
+      visibilityState: (() => {
+        const d = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
+        return d && d.get ? d.get.bind(document) : () => document.visibilityState;
+      })(),
     };
+    try{ Object.defineProperty(window, '__quizSecureMarker', {value:true, configurable:false, writable:false}); }catch{}
 
-    // Mark that originals were captured (tamper-evidence)
-    try{ Object.defineProperty(window, '__quizSecureMarker', {value:true, configurable:false, writable:false}); }catch(e){}
-
-    // -------------------------
-    // Defensive helpers
-    // -------------------------
-
-    // Use original addEventListener to attach trusted handlers (so user cannot override later)
     function trustedAddEvent(target, type, handler, opts){
-      try{
-        ORIGINAL.addEventListener.call(target, type, handler, opts);
-      }catch(e){
-        // fallback
-        target.addEventListener(type, handler, opts);
-      }
+      try { ORIGINAL.addEventListener.call(target, type, handler, opts); }
+      catch { target.addEventListener(type, handler, opts); }
     }
 
-
-    // -------------------------
-    // Enhanced fullscreen helper for cross-platform compatibility
-    // -------------------------
-    function requestFullscreen() {
+    // ===== Fullscreen helpers
+    function requestFullscreen(){
       const el = document.documentElement;
-      // Enhanced fullscreen API detection for better cross-platform support
-      const rfs = el.requestFullscreen || 
-                  el.webkitRequestFullscreen || 
-                  el.mozRequestFullScreen || 
-                  el.msRequestFullscreen ||
-                  el.webkitEnterFullscreen; // Safari mobile
-
-      if (rfs) {
-        return rfs.call(el).catch((err) => {
-          console.warn('Fullscreen request failed:', err);
-          // Don't fail the quiz if fullscreen fails
-        });
-      }
+      const rfs = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen || el.webkitEnterFullscreen;
+      if (rfs) { try { return Promise.resolve(rfs.call(el)); } catch(e) { return Promise.resolve(); } }
       return Promise.resolve();
     }
+    function isBrowserUIFullscreen(){
+      return Math.abs(window.innerHeight - screen.availHeight) <= 1 && Math.abs(window.innerWidth - screen.availWidth) <= 1;
+    }
+    function ensureFullscreen(){
+      const fsEl = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement || null;
+      return !!fsEl || isBrowserUIFullscreen();
+    }
 
-    // -------------------------
-    // Start/Resume handlers
-    // -------------------------
+    // ===== Start/Resume handlers
     function startQuiz(){
-      // Attempt to harden environment in case something tries to mutate later
       initializeTamperWatch();
-
       requestFullscreen().then(() => {
         hideOverlay();
         quizFrame.style.display = 'block';
-        // Quiz started - logging locally
+        setTimeout(startWatchdogs, 300);
       });
     }
-
+    startBtn.addEventListener('click', startQuiz);
     resumeBtn.addEventListener('click', () => {
       requestFullscreen().then(() => {
         hideOverlay();
         quizFrame.style.display = 'block';
+        setTimeout(startWatchdogs, 300);
       });
     });
 
-    // -------------------------
-    // Key combos: disable common close/dev keys and detect attempts
-    // Enhanced for Mac, Linux, and Windows compatibility
-    // -------------------------
-    trustedAddEvent(window, 'keydown', (e) => {
-      // Enhanced platform detection
-      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0 || 
-                   navigator.userAgent.toUpperCase().indexOf('MAC') >= 0;
-      const isLinux = navigator.platform.toUpperCase().indexOf('LINUX') >= 0 ||
-                     navigator.userAgent.toUpperCase().indexOf('LINUX') >= 0;
-
-      // Detect attempts to close tab/window (cross-platform)
-      if ((isMac && e.metaKey && (e.key === 'w' || e.key === 'W' || e.key === 'q' || e.key === 'Q')) ||
-          ((!isMac && !isLinux) && ((e.ctrlKey && (e.key === 'w' || e.key === 'W')) || e.key === 'F4')) ||
-          (isLinux && e.ctrlKey && (e.key === 'w' || e.key === 'W' || e.key === 'q' || e.key === 'Q'))) {
-        e.preventDefault();
-        e.stopPropagation();
-        recordViolation('Attempted close (keyboard shortcut detected)');
-        return false;
-      }
-
-      // Block devtools combos (enhanced for all platforms)
-      if (e.key === 'F12' || 
-          (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'J' || e.key === 'C' || e.key === 'K')) ||
-          (isMac && e.metaKey && e.altKey && e.key === 'I') ||
-          (isLinux && e.ctrlKey && e.shiftKey && e.key === 'I') ||
-          (e.ctrlKey && e.key === 'U') || // View source
-          (isMac && e.metaKey && e.key === 'U')) { // Mac view source
-        e.preventDefault();
-        e.stopPropagation();
-        recordViolation('Attempt to open developer tools detected');
-        return false;
+    trustedAddEvent(document, 'keydown', (e) => {
+      if (e.key === 'F11') {
+        requestFullscreen().then(() => {
+          hideOverlay();
+          quizFrame.style.display = 'block';
+          setTimeout(startWatchdogs, 300);
+        });
       }
     }, {capture:true});
 
-    // Disable context menu
+    // ===== Non-blocking DevTools detection (safe)
+    // 1) timing of a small no-op function & Function.prototype.toString call
+    // 2) window size gap heuristic
+    (function setupDevtoolsSignals(){
+      // Timing heuristic using Function.prototype.toString (non-blocking)
+      setInterval(() => {
+        try {
+          const t0 = ORIGINAL.performanceNow();
+          // Call toString on a small function - sometimes slower when DevTools are open
+          // This is non-blocking and doesn't use `debugger;`
+          const fnStr = Function.prototype.toString.call(function(){});
+          const dt = ORIGINAL.performanceNow() - t0;
+          if (dt > 150) { // threshold in ms - tune as needed
+            recordViolation('DevTools timing anomaly detected');
+          }
+        } catch(e){ /* ignore errors — detection best-effort */ }
+      }, 2000);
+
+      // Window gap heuristic: when DevTools open docked it often changes outer vs inner sizes
+      setInterval(() => {
+        try {
+          const gapH = Math.abs(window.outerHeight - window.innerHeight);
+          const gapW = Math.abs(window.outerWidth - window.innerWidth);
+          // if large gap, likely docked devtools or resize
+          if (gapH > 160 || gapW > 160) {
+            recordViolation('Developer tools window heuristic triggered');
+          }
+        } catch(e){ }
+      }, 1500);
+    })();
+
+    // ===== Disable context menu (UX deterrent)
     trustedAddEvent(document, 'contextmenu', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
       recordViolation('Right-click/context menu attempt');
       return false;
     }, {capture:true});
 
-    // -------------------------
-    // beforeunload: detect close attempts
-    // -------------------------
-    trustedAddEvent(window, 'beforeunload', function(e){
-      // Give the user a chance but mark it as violation
-      recordViolation('Attempted to close window (beforeunload event)');
-      // Standard beforeunload UX: show confirmation
-      e.preventDefault();
-      e.returnValue = '';
-      return '';
+    // ===== Key combos deterrence (advisory)
+    trustedAddEvent(window, 'keydown', (e) => {
+      const k = (e.key || '').toLowerCase();
+      const isCloseCombo = (e.ctrlKey || e.metaKey) && (k === 'w' || k === 'q');
+      const isDevTools = e.key === 'F12'
+        || (e.ctrlKey && e.shiftKey && ['i','j','c','k'].includes(k))
+        || (e.ctrlKey && k === 'u')
+        || (e.metaKey && e.altKey && k === 'i');
+      const isRefresh = (e.ctrlKey && (k === 'r')) || (k === 'f5') || (e.ctrlKey && e.shiftKey && k === 'r') || (e.metaKey && k === 'r');
+      if (isCloseCombo || isDevTools || isRefresh) {
+        e.preventDefault(); e.stopPropagation();
+        recordViolation(isCloseCombo ? 'Attempted close (keyboard shortcut)'
+                      : isRefresh ? 'Attempted refresh (keyboard shortcut)'
+                      : 'Attempt to open developer tools');
+        return false;
+      }
     }, {capture:true});
 
-    // -------------------------
-    // Watchdog: rAF loop (primary)
-    // - Uses bound original functions to resist overrides
-    // -------------------------
+    // beforeunload detection
+    trustedAddEvent(window, 'beforeunload', (e) => {
+      recordViolation('Attempted to close or reload window');
+      e.preventDefault(); e.returnValue = ''; return '';
+    }, {capture:true});
+
+    // ===== Watchdog via rAF
     let lastPerf = ORIGINAL.performanceNow();
-    let perfTickCount = 0;
     let rafId = null;
+    let fsGraceUntil = 0;
+    const CONFIG = {
+      fullscreenRequired: true,
+      fullscreenGraceMs: 3500,
+      perfGapMs: 2000,
+    };
 
     function primaryWatchdogLoop(){
       try{
-        // 1) Focus check (use original bound function)
-        const focused = ORIGINAL.hasFocus();
-        if (!focused && quizFrame.style.display === 'block') {
-          recordViolation('Window lost focus (document.hasFocus returned false).');
+        // Focus
+        if (quizFrame.style.display === 'block') {
+          const focused = ORIGINAL.hasFocus();
+          if (!focused) recordViolation('Window lost focus');
         }
-
-        // 2) Visibility check (try multiple signals)
-        const visHidden = (typeof document.hidden === 'boolean') ? document.hidden : (ORIGINAL.visibilityState ? ORIGINAL.visibilityState() !== 'visible' : false);
-        const visState = (document.visibilityState || (ORIGINAL.visibilityState ? ORIGINAL.visibilityState() : 'visible'));
-        if ((visHidden || visState !== 'visible') && quizFrame.style.display === 'block') {
-          recordViolation('Tab not visible (visibilityState/hidden reported non-visible).');
+        // Visibility
+        const visState = document.visibilityState || (ORIGINAL.visibilityState ? ORIGINAL.visibilityState() : 'visible');
+        if (quizFrame.style.display === 'block' && visState !== 'visible') {
+          recordViolation('Tab not visible');
         }
-
-        // 3) Enhanced fullscreen exit check (cross-platform)
-        const fsEl = document.fullscreenElement || 
-                    document.webkitFullscreenElement || 
-                    document.mozFullScreenElement ||
-                    document.msFullscreenElement || 
-                    null;
-        if (!fsEl && quizFrame.style.display === 'block') {
-          recordViolation('Fullscreen exit detected.');
+        // Fullscreen with grace
+        if (quizFrame.style.display === 'block' && !ensureFullscreen()) {
+          if (!fsGraceUntil) fsGraceUntil = Date.now() + CONFIG.fullscreenGraceMs;
+          if (CONFIG.fullscreenRequired && Date.now() > fsGraceUntil) {
+            recordViolation('Fullscreen not active');
+          }
+        } else {
+          fsGraceUntil = 0;
         }
-
-        // 4) Performance drift detection (background tabs throttle timers)
+        // Perf drift
         const now = ORIGINAL.performanceNow();
-        const delta = now - lastPerf;
-        // if delta >> expected (rAF runs ~60fps; but we check for large gaps)
-        if (delta > 2000 && quizFrame.style.display === 'block') {
-          recordViolation('Large performance/time gap detected (possible backgrounding).');
+        if ((now - lastPerf) > CONFIG.perfGapMs && quizFrame.style.display === 'block') {
+          recordViolation('Large performance gap (possible backgrounding)');
         }
         lastPerf = now;
       }catch(err){
-        // If core APIs throw, treat as tampering
-        recordViolation('Watchdog error (possible tampering detected).');
+        recordViolation('Watchdog error (possible tampering)');
       }
-
-      // Schedule next loop via original rAF
       rafId = ORIGINAL.requestAnimationFrame(primaryWatchdogLoop);
     }
 
-    // Start rAF watchdog but only after quiz started (we'll start when quiz is resumed)
     function startWatchdogs(){
       if (!rafId) rafId = ORIGINAL.requestAnimationFrame(primaryWatchdogLoop);
-      // Also start a longer interval heartbeat that uses original perf to detect timer clear attempts
-      if (!window.__quizIntervalToken) {
-        window.__quizIntervalToken = setInterval(() => {
-          try {
-            // Check whether the original addEventListener was replaced
-            if (EventTarget.prototype.addEventListener !== ORIGINAL.addEventListener) {
-              recordViolation('EventTarget.prototype.addEventListener was modified (tampering).');
-            }
-            if (document.hasFocus !== ORIGINAL.hasFocus && typeof document.hasFocus === 'function') {
-              // someone replaced document.hasFocus — call original bound to detect difference
-              if (!ORIGINAL.hasFocus()) recordViolation('document.hasFocus has been tampered with.');
-            }
-          } catch(e) {
-            recordViolation('Interval watchdog error.');
-          }
-        }, 1200);
-      }
-
     }
-
-    // Stop watchdogs (used when ending quiz)
     function stopWatchdogs(){
-      try{
-        if (rafId && ORIGINAL.cancelAnimationFrame) ORIGINAL.cancelAnimationFrame(rafId);
-      }catch(e){}
-      try{
-        if (window.__quizIntervalToken) { clearInterval(window.__quizIntervalToken); window.__quizIntervalToken = null; }
-      }catch(e){}
+      try{ if (rafId && ORIGINAL.cancelAnimationFrame) ORIGINAL.cancelAnimationFrame(rafId); }catch{}
+      rafId = null;
     }
 
-    // Start watchdogs when quiz is shown
-    const origStart = startQuiz;
-    // Add start handler that calls startQuiz and then starts watchdogs:
-    startBtn.addEventListener('click', () => {
-      startQuiz();
-      // small delay to ensure fullscreen request handled
-      setTimeout(() => startWatchdogs(), 300);
-    });
-
-    resumeBtn.addEventListener('click', () => {
-      setTimeout(() => startWatchdogs(), 300);
-    });
-
-    // If iframe is visible (user started), ensure watchdogs running
-    // Hook into visibilitychange and fullscreenchange using the trustedAddEvent
+    // Visibility + fullscreen change hooks
     trustedAddEvent(document, 'visibilitychange', () => {
-      // If page becomes hidden while quiz running, immediately count
       if (document.hidden && quizFrame.style.display === 'block') {
-        recordViolation('visibilitychange: document.hidden became true');
+        recordViolation('document became hidden');
       }
     }, {capture:true});
-
-    // Enhanced fullscreen change detection for cross-platform support
-    const fullscreenEvents = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'];
-    fullscreenEvents.forEach(eventType => {
-      trustedAddEvent(document, eventType, () => {
-        const fsEl = document.fullscreenElement || 
-                    document.webkitFullscreenElement || 
-                    document.mozFullScreenElement ||
-                    document.msFullscreenElement;
-        if (!fsEl && quizFrame.style.display === 'block') {
-          recordViolation('fullscreenchange: exited fullscreen');
+    ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange'].forEach(evt => {
+      trustedAddEvent(document, evt, () => {
+        if (!ensureFullscreen() && quizFrame.style.display === 'block') {
+          if (!fsGraceUntil) fsGraceUntil = Date.now() + CONFIG.fullscreenGraceMs;
+          if (Date.now() > fsGraceUntil) recordViolation('Exited fullscreen');
         }
       }, {capture:true});
     });
 
-    // -------------------------
-    // Tamper-evidence integrity check (lightweight)
-    // - Compute a short fingerprint of the inline script block (best-effort).
-    // - Show a log entry if the script text differs from the moment of load.
-    // -------------------------
-    (function tamperFingerprint(){
+    // ===== Tamper-evidence (lightweight, non-breaking)
+    (function fingerprintSelf(){
       try {
-        // Attempt to find the script element that includes this code.
         const scripts = Array.from(document.getElementsByTagName('script'));
-        // Heuristic: find a script that contains "Hardened Secure Quiz" comment above.
-        const mine = scripts.find(s => s.textContent && s.textContent.indexOf('Hardened Secure Quiz') !== -1);
-        if (!mine) return;
+        const mine = scripts.find(s => s.textContent && s.textContent.includes('Hardened Secure Quiz'));
+        if (!mine || !crypto?.subtle) return;
         const text = mine.textContent.trim();
-        // compute a simple hash using SubtleCrypto (sha-256)
-        if (window.crypto && crypto.subtle) {
-          const encoder = new TextEncoder();
-          crypto.subtle.digest('SHA-256', encoder.encode(text)).then(hashBuffer => {
-            const hashArray = Array.from(new Uint8Array(hashBuffer));
-            const hashHex = hashArray.map(b => b.toString(16).padStart(2,'0')).join('');
-            // Save initial fingerprint in a non-writable place
-            try {
-              Object.defineProperty(window, '__quizScriptFingerprint', {value:hashHex, configurable:false, writable:false});
-            }catch(e){}
-          }).catch(()=>{});
-        }
-      } catch(e){}
+        const enc = new TextEncoder();
+        crypto.subtle.digest('SHA-256', enc.encode(text)).then(buf => {
+          const hex = Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+          try { Object.defineProperty(window, '__quizScriptFingerprint', { value: hex, configurable:false, writable:false }); } catch {}
+        }).catch(()=>{});
+      } catch {}
     })();
-
-    // Periodically check fingerprint hasn't changed (tamper-evidence)
     setInterval(() => {
       try{
-        if (!window.__quizScriptFingerprint) return;
+        if (!window.__quizScriptFingerprint || !crypto?.subtle) return;
         const scripts = Array.from(document.getElementsByTagName('script'));
-        const mine = scripts.find(s => s.textContent && s.textContent.indexOf('Hardened Secure Quiz') !== -1);
+        const mine = scripts.find(s => s.textContent && s.textContent.includes('Hardened Secure Quiz'));
         if (!mine) return;
-        const text = mine.textContent.trim();
-        if (window.crypto && crypto.subtle) {
-          const encoder = new TextEncoder();
-          crypto.subtle.digest('SHA-256', encoder.encode(text)).then(hashBuffer => {
-            const hashArray = Array.from(new Uint8Array(hashBuffer));
-            const hashHex = hashArray.map(b => b.toString(16).padStart(2,'0')).join('');
-            if (hashHex !== window.__quizScriptFingerprint) {
-              recordViolation('Script fingerprint changed (possible tampering).');
-            }
-          }).catch(()=>{});
-        }
-      }catch(e){}
+        const enc = new TextEncoder();
+        crypto.subtle.digest('SHA-256', enc.encode(mine.textContent.trim())).then(buf => {
+          const nowHex = Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+          if (nowHex !== window.__quizScriptFingerprint) {
+            recordViolation('Script fingerprint changed (possible tampering).');
+          }
+        }).catch(()=>{});
+      }catch{}
     }, 5000);
 
-    // -------------------------
-    // Defensive initializers: protect against lazy overrides
-    // -------------------------
+    // ===== Defensive initializer
     function initializeTamperWatch(){
       try{
-        // Make sure critical originals still point to captured ones
         if (EventTarget.prototype.addEventListener !== ORIGINAL.addEventListener) {
-          // Rebind addEventListener to original under a safe property to use for trusted attachments
-          try { EventTarget.prototype.addEventListener = ORIGINAL.addEventListener; } catch(e){}
+          try { EventTarget.prototype.addEventListener = ORIGINAL.addEventListener; } catch {}
         }
-      }catch(e){}
-      // Start watchdogs
+      }catch{}
+      // Start watchdogs when called
       startWatchdogs();
     }
 
-    // Provide a UI-safe resume flow when user clicks Resume (already wired above).
-    // Show initial overlay until the user starts.
+    // ===== Initial UI
     showOverlay('Click Start to Begin Quiz');
 
-    // -------------
-    // Utility: hide the overlay if user starts full-screen with F11 or browser UI
-    // -------------
-    trustedAddEvent(document, 'keydown', (e) => {
-      if (e.key === 'F11') {
-        // Attempt to start fullscreen then hide overlay
-        requestFullscreen().then(() => {
-          hideOverlay();
-          quizFrame.style.display = 'block';
-        });
-      }
-    });
-
-    // On page unload, stop watchdogs gracefully
+    // ===== Cleanup on unload
     trustedAddEvent(window, 'unload', () => {
       stopWatchdogs();
+      try { console.log('Final violations log:', violationLog); } catch {}
     });
-
-    // Expose internals for debugging in dev only (comment out in production)
-    try{
-      Object.defineProperty(window, '__secureQuizInternals', {
-        value: {ORIGINAL, recordViolation, violationLog},
-        configurable: true, writable: false
-      });
-    }catch(e){}
-
-    // Final note: startWatchdogs if an auto-start policy is used by your institution.
-    // startWatchdogs();
 
   })();
   </script>
-
 </body>
 </html>
