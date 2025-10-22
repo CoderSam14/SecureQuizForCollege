@@ -3,337 +3,386 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Strict Secure Quiz — Hardened (Stable)</title>
+  <title>Strict Secure Quiz — Hybrid (Persistent Lock, Stable Resume)</title>
   <style>
-    html,body{height:100%;width:100%;margin:0;padding:0;background:#000;font-family:Inter, Arial, sans-serif;overflow:hidden}
-    iframe{width:100%;height:100%;border:0;display:none}
+    html,body{height:100%;width:100%;margin:0;padding:0;background:#000;color:#fff;font-family:Inter,Arial,sans-serif;overflow:hidden}
+    iframe{width:100%;height:100%;border:0;display:none;background:#111}
     #overlay{
       position:fixed;inset:0;background:#000;z-index:99999;display:flex;flex-direction:column;
-      justify-content:center;align-items:center;color:#fff;padding:24px;text-align:center;
+      justify-content:center;align-items:center;padding:24px;text-align:center;gap:10px
     }
-    #overlay h1{margin:0 0 12px;font-size:22px}
-    #overlay p{margin:8px 0;color:#ddd}
-    button{
-      font-size:16px;padding:12px 20px;border-radius:10px;border:0;cursor:pointer;margin:8px;
-    }
-    #startBtn{background:#0b9d58;color:#fff}
+    #overlay h1{margin:0 0 8px;font-size:22px;line-height:1.25;font-weight:600}
+    #overlay p{margin:0;color:#cfcfcf}
+    #overlay .hint{font-size:12px;color:#9a9a9a;margin-top:10px}
+    .row{display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap}
+    button{font-size:16px;padding:12px 18px;border-radius:10px;border:0;cursor:pointer;min-width:140px;transition:transform .06s ease,opacity .12s ease}
+    button:active{transform:translateY(1px)} button:disabled{opacity:.5;cursor:not-allowed}
+    #startBtn{background:#0b9d58;color:#fff;display:inline-block}
     #resumeBtn{background:#f59f00;color:#fff;display:none}
-    .small{font-size:12px;color:#aaa;margin-top:8px}
 
-    /* Non-destructive UX hardening */
-    * { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent }
-    body { -webkit-user-drag:none; user-drag:none }
+    *{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+    img{-webkit-user-drag:none;user-drag:none;pointer-events:none}
     ::-webkit-scrollbar{display:none}
-    ::selection{background:transparent} ::-moz-selection{background:transparent}
-    img{ -webkit-user-drag:none; user-drag:none; pointer-events:none }
+    ::selection{background:transparent}::-moz-selection{background:transparent}
   </style>
 </head>
 <body>
 
   <div id="overlay" role="dialog" aria-modal="true" aria-labelledby="overlayText">
     <h1 id="overlayText">Click Start to Begin Quiz</h1>
-    <div>
+    <div class="row">
       <button id="startBtn">Start Quiz</button>
       <button id="resumeBtn">Resume Quiz</button>
     </div>
-    <p class="small">This page enforces fullscreen & focus. Leaving the quiz or tampering will be recorded.</p>
+    <p id="subText" class="hint">Before starting, only opening DevTools will block you. After starting, policy applies.</p>
   </div>
 
-  <iframe id="quizFrame" src="https://vitapcolab129.examly.io/login" title="Quiz"></iframe>
+  <iframe
+    id="quizFrame"
+    src="https://vitapcolab129.examly.io/login"
+    title="Quiz"
+    allow="fullscreen"
+    sandbox="allow-forms allow-scripts allow-same-origin"
+  ></iframe>
 
   <script>
   (function(){
     'use strict';
 
-    /**********************************************************************
-     * Stable hardened wrapper
-     * - Replaces blocking `debugger;` with non-blocking timing heuristics
-     * - Keeps watchdogs and tamper-evidence but avoids breaking runtime
-     **********************************************************************/
-
-    // ===== Basic UI & state
-    const overlay = document.getElementById('overlay');
-    const overlayText = document.getElementById('overlayText');
-    const startBtn = document.getElementById('startBtn');
+    /* ===== DOM ===== */
+    const overlay   = document.getElementById('overlay');
+    const titleEl   = document.getElementById('overlayText');
+    const subEl     = document.getElementById('subText');
+    const startBtn  = document.getElementById('startBtn');
     const resumeBtn = document.getElementById('resumeBtn');
     const quizFrame = document.getElementById('quizFrame');
 
-    let violations = 0;
-    const maxViolations = 4;
-    const violationLog = [];
+    function showOverlay(t,s){ if(t) titleEl.innerText=t; if(s!==undefined) subEl.innerText=s; overlay.style.display='flex'; }
+    function hideOverlay(){ overlay.style.display='none'; }
 
-    function showOverlay(text){
-      if (text) overlayText.innerText = text;
-      overlay.style.display = 'flex';
-    }
-    function hideOverlay(){
-      overlay.style.display = 'none';
-    }
-    function endQuiz(){
-      quizFrame.style.display = 'none';
-      showOverlay('❌ Quiz ended due to repeated violations.');
-      resumeBtn.style.display = 'none';
-      startBtn.style.display = 'none';
-      stopWatchdogs();
-    }
-    function recordViolation(reason){
-      try {
-        violations++;
-        const ts = new Date().toISOString();
-        violationLog.push({ts, reason});
-        console.warn('Quiz Violation:', reason, `(${violations}/${maxViolations})`);
-      } catch(e){}
-      if (violations >= maxViolations) {
-        endQuiz();
-      } else {
-        try {
-          quizFrame.style.display = 'none';
-          showOverlay(`⚠️ ${reason}\n(${violations}/${maxViolations})\nClick Resume to continue.`);
-          startBtn.style.display = 'none';
-          resumeBtn.style.display = 'inline-block';
-        } catch(e){}
-      }
-    }
+    /* ===== Config ===== */
+    const NORMAL_MAX_STRIKES   = 3;      // non-DevTools violations allowed after Start
+    const FULLSCREEN_GRACE_MS  = 3500;   // grace window after FS changes/resume
+    const PERF_GAP_MS          = 2000;   // perf drift threshold
+    const RESUME_GRACE_MS      = 1200;   // ignore checks briefly after resume to avoid false positives
+    const RESUME_GRACE_FRAMES  = 8;      // or frames grace, whichever ends first
+    const LOCK_KEY             = 'quiz_lock_v3';
+    const LOCK_MINUTES         = 60;     // persistent lock duration
 
-    // ===== Bind originals early
-    const ORIGINAL = {
+    /* ===== State ===== */
+    let hasStarted=false, locked=false;
+    let normalStrikes=0;
+    let fsGraceUntil=0;
+    let rafId=null;
+    let lastPerf=0;
+    let resumeGraceUntil=0;
+    let resumeGraceFrames=0;
+
+    /* ===== Originals ===== */
+    const ORIGINAL={
       addEventListener: EventTarget.prototype.addEventListener,
-      removeEventListener: EventTarget.prototype.removeEventListener,
-      hasFocus: document.hasFocus.bind(document),
       requestAnimationFrame: window.requestAnimationFrame.bind(window),
       cancelAnimationFrame: window.cancelAnimationFrame ? window.cancelAnimationFrame.bind(window) : null,
-      performanceNow: (performance && performance.now) ? performance.now.bind(performance) : Date.now.bind(Date),
-      visibilityState: (() => {
-        const d = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
-        return d && d.get ? d.get.bind(document) : () => document.visibilityState;
-      })(),
+      perfNow: (performance&&performance.now)?performance.now.bind(performance):Date.now.bind(Date),
+      hasFocus: document.hasFocus?document.hasFocus.bind(document):()=>true,
+      visGet: (()=>{const d=Object.getOwnPropertyDescriptor(Document.prototype,'visibilityState');return d&&d.get?d.get.bind(document):()=>document.visibilityState;})(),
+      console: {
+        log: console.log.bind(console),
+        info: console.info?console.info.bind(console):console.log.bind(console),
+        warn: console.warn?console.warn.bind(console):console.log.bind(console),
+        error: console.error?console.error.bind(console):console.log.bind(console),
+        table: console.table?console.table.bind(console):function(){},
+        trace: console.trace?console.trace.bind(console):function(){},
+        debug: console.debug?console.debug.bind(console):console.log.bind(console),
+      }
     };
-    try{ Object.defineProperty(window, '__quizSecureMarker', {value:true, configurable:false, writable:false}); }catch{}
+    function on(t,ev,fn,opts){ try{ ORIGINAL.addEventListener.call(t,ev,fn,opts); }catch{ t.addEventListener(ev,fn,opts); } }
 
-    function trustedAddEvent(target, type, handler, opts){
-      try { ORIGINAL.addEventListener.call(target, type, handler, opts); }
-      catch { target.addEventListener(type, handler, opts); }
+    /* ===== Persistent lock ===== */
+    function makeLock(reason){ return { reason:String(reason||'policy violation'), expiry: Date.now()+LOCK_MINUTES*60*1000 }; }
+    function setLock(reason){
+      const lock=makeLock(reason);
+      try{
+        localStorage.setItem(LOCK_KEY, JSON.stringify(lock));
+        sessionStorage.setItem(LOCK_KEY, JSON.stringify(lock));
+      }catch{}
+      applyLock(lock);
+      // optional IndexedDB (best effort)
+      try {
+        const req=indexedDB.open('quiz-lock-store',1);
+        req.onupgradeneeded=e=>{
+          const db=e.target.result;
+          if(!db.objectStoreNames.contains('locks')) db.createObjectStore('locks');
+        };
+        req.onsuccess=e=>{
+          const db=e.target.result;
+          try{ const tx=db.transaction('locks','readwrite'); tx.objectStore('locks').put(lock,'persistentLock'); tx.oncomplete=()=>db.close(); }catch{ db.close(); }
+        };
+      }catch{}
+    }
+    function readLock(){
+      try{
+        const raw=localStorage.getItem(LOCK_KEY);
+        if(!raw) return null;
+        const o=JSON.parse(raw);
+        if(!o||!o.expiry) return null;
+        if(Date.now()>=o.expiry){ localStorage.removeItem(LOCK_KEY); sessionStorage.removeItem(LOCK_KEY); return null; }
+        return o;
+      }catch{ return null; }
+    }
+    function applyLock(lock){
+      locked=true;
+      try{ quizFrame.style.display='none'; }catch{}
+      try{
+        showOverlay(`❌ Blocked: ${lock.reason}`, `Locked until ${new Date(lock.expiry).toLocaleString()}`);
+        startBtn.style.display='none'; resumeBtn.style.display='none';
+      }catch{}
+      stopWatchdogs();
+      // stop detectors
+      preQuizIntervals.forEach(id=>clearInterval(id));
+      postStartIntervals.forEach(id=>clearInterval(id));
     }
 
-    // ===== Fullscreen helpers
+    // Check lock on load
+    const existingLock = readLock();
+    if(existingLock){ applyLock(existingLock); return; }
+
+    /* ===== Fullscreen helpers ===== */
     function requestFullscreen(){
-      const el = document.documentElement;
-      const rfs = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen || el.webkitEnterFullscreen;
-      if (rfs) { try { return Promise.resolve(rfs.call(el)); } catch(e) { return Promise.resolve(); } }
+      const el=document.documentElement;
+      const rfs=el.requestFullscreen||el.webkitRequestFullscreen||el.mozRequestFullScreen||el.msRequestFullscreen||el.webkitEnterFullscreen;
+      if(rfs){ try{ return Promise.resolve(rfs.call(el)); }catch{ return Promise.resolve(); } }
       return Promise.resolve();
     }
     function isBrowserUIFullscreen(){
-      return Math.abs(window.innerHeight - screen.availHeight) <= 1 && Math.abs(window.innerWidth - screen.availWidth) <= 1;
+      try{ return Math.abs(window.innerHeight-screen.availHeight)<=1 && Math.abs(window.innerWidth-screen.availWidth)<=1; }catch{ return false; }
     }
-    function ensureFullscreen(){
-      const fsEl = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement || null;
-      return !!fsEl || isBrowserUIFullscreen();
+    function inFullscreen(){
+      const fs=document.fullscreenElement||document.webkitFullscreenElement||document.mozFullScreenElement||document.msFullscreenElement||null;
+      return !!fs || isBrowserUIFullscreen();
     }
 
-    // ===== Start/Resume handlers
+    /* ===== Block / Warn flows ===== */
+    function hardBlock(reason){ if(locked) return; setLock(reason||'policy violation'); }
+
+    function warnStrike(reason){
+      if(locked) return;
+      normalStrikes++;
+      if(normalStrikes>=NORMAL_MAX_STRIKES) return hardBlock('Too many violations');
+
+      // Pause watchdog to prevent cascading errors while overlay is shown
+      stopWatchdogs();
+
+      quizFrame.style.display='none';
+      showOverlay(`⚠️ ${reason}`, `Warning ${normalStrikes}/${NORMAL_MAX_STRIKES}. Click "Resume Quiz" to continue.`);
+      startBtn.style.display='none'; resumeBtn.style.display='inline-block';
+    }
+
+    /* ===== Start / Resume ===== */
     function startQuiz(){
-      initializeTamperWatch();
-      requestFullscreen().then(() => {
+      if(locked) return;
+      hasStarted=true;
+      requestFullscreen().then(()=>{
         hideOverlay();
-        quizFrame.style.display = 'block';
-        setTimeout(startWatchdogs, 300);
+        quizFrame.style.display='block';
+
+        // Reset timers / grace so no immediate false positives
+        lastPerf=ORIGINAL.perfNow();
+        fsGraceUntil = Date.now()+FULLSCREEN_GRACE_MS;
+        resumeGraceUntil = Date.now()+RESUME_GRACE_MS;
+        resumeGraceFrames = RESUME_GRACE_FRAMES;
+
+        // start watchdog + post-start detectors
+        setTimeout(()=>{
+          startWatchdogs();
+          startPostStartDevtoolsDetectors();
+          wirePostStartShortcuts();
+          wireContextMenuPostStart();
+        }, 150);
       });
     }
-    startBtn.addEventListener('click', startQuiz);
-    resumeBtn.addEventListener('click', () => {
-      requestFullscreen().then(() => {
+
+    function resumeQuiz(){
+      if(locked) return;
+      if(!hasStarted) return startQuiz();
+
+      requestFullscreen().then(()=>{
         hideOverlay();
-        quizFrame.style.display = 'block';
-        setTimeout(startWatchdogs, 300);
+        quizFrame.style.display='block';
+
+        // Reset timers / grace again before restarting watchdog
+        lastPerf=ORIGINAL.perfNow();
+        fsGraceUntil = Date.now()+FULLSCREEN_GRACE_MS;
+        resumeGraceUntil = Date.now()+RESUME_GRACE_MS;
+        resumeGraceFrames = RESUME_GRACE_FRAMES;
+
+        startWatchdogs(); // restart loop cleanly
       });
-    });
+    }
 
-    trustedAddEvent(document, 'keydown', (e) => {
-      if (e.key === 'F11') {
-        requestFullscreen().then(() => {
-          hideOverlay();
-          quizFrame.style.display = 'block';
-          setTimeout(startWatchdogs, 300);
-        });
-      }
-    }, {capture:true});
+    startBtn.addEventListener('click', startQuiz);
+    resumeBtn.addEventListener('click', resumeQuiz);
 
-    // ===== Non-blocking DevTools detection (safe)
-    // 1) timing of a small no-op function & Function.prototype.toString call
-    // 2) window size gap heuristic
-    (function setupDevtoolsSignals(){
-      // Timing heuristic using Function.prototype.toString (non-blocking)
-      setInterval(() => {
-        try {
-          const t0 = ORIGINAL.performanceNow();
-          // Call toString on a small function - sometimes slower when DevTools are open
-          // This is non-blocking and doesn't use `debugger;`
-          const fnStr = Function.prototype.toString.call(function(){});
-          const dt = ORIGINAL.performanceNow() - t0;
-          if (dt > 150) { // threshold in ms - tune as needed
-            recordViolation('DevTools timing anomaly detected');
-          }
-        } catch(e){ /* ignore errors — detection best-effort */ }
-      }, 2000);
+    // Optional: F11 to start
+    on(document,'keydown',e=>{ if(!hasStarted && !locked && e.key==='F11'){ e.preventDefault(); startQuiz(); } },{capture:true});
 
-      // Window gap heuristic: when DevTools open docked it often changes outer vs inner sizes
-      setInterval(() => {
-        try {
-          const gapH = Math.abs(window.outerHeight - window.innerHeight);
-          const gapW = Math.abs(window.outerWidth - window.innerWidth);
-          // if large gap, likely docked devtools or resize
-          if (gapH > 160 || gapW > 160) {
-            recordViolation('Developer tools window heuristic triggered');
-          }
-        } catch(e){ }
-      }, 1500);
+    /* ===== Pre-quiz: DevTools-only blocking (persistent) ===== */
+    const preQuizIntervals=[];
+
+    // A) DOM element probe loop (reliable on Chromium)
+    (function preProbe(){
+      try{
+        const img = new Image();
+        Object.defineProperty(img,'id',{ get(){ if(!hasStarted && !locked) hardBlock('DevTools opened (pre-quiz)'); return 'x'; }});
+        preQuizIntervals.push(setInterval(()=>{ if(locked||hasStarted) return; ORIGINAL.console.log(img); }, 1000));
+      }catch{}
     })();
 
-    // ===== Disable context menu (UX deterrent)
-    trustedAddEvent(document, 'contextmenu', (e) => {
-      e.preventDefault(); e.stopPropagation();
-      recordViolation('Right-click/context menu attempt');
-      return false;
+    // B) Docked DevTools gap
+    preQuizIntervals.push(setInterval(()=>{
+      if(locked||hasStarted) return;
+      const gapH=Math.abs(window.outerHeight-window.innerHeight);
+      const gapW=Math.abs(window.outerWidth-window.innerWidth);
+      if(gapH>160||gapW>160) hardBlock('DevTools detected (pre-quiz)');
+    }, 900));
+
+    // C) Timing anomaly
+    preQuizIntervals.push(setInterval(()=>{
+      if(locked||hasStarted) return;
+      const t0=ORIGINAL.perfNow(); Function.prototype.toString.call(function(){});
+      const dt=ORIGINAL.perfNow()-t0;
+      if(dt>175) hardBlock('DevTools timing anomaly (pre-quiz)');
+    }, 1500));
+
+    // D) Pre-quiz DevTools shortcuts only
+    on(window,'keydown',e=>{
+      if(locked||hasStarted) return;
+      const k=(e.key||'').toLowerCase();
+      const dev = e.key==='F12' || (e.ctrlKey&&e.shiftKey&&['i','j','c','k'].includes(k)) || (e.ctrlKey&&k==='u') || (e.metaKey&&e.altKey&&k==='i');
+      if(dev){ e.preventDefault(); e.stopPropagation(); hardBlock('DevTools shortcut (pre-quiz)'); }
     }, {capture:true});
 
-    // ===== Key combos deterrence (advisory)
-    trustedAddEvent(window, 'keydown', (e) => {
-      const k = (e.key || '').toLowerCase();
-      const isCloseCombo = (e.ctrlKey || e.metaKey) && (k === 'w' || k === 'q');
-      const isDevTools = e.key === 'F12'
-        || (e.ctrlKey && e.shiftKey && ['i','j','c','k'].includes(k))
-        || (e.ctrlKey && k === 'u')
-        || (e.metaKey && e.altKey && k === 'i');
-      const isRefresh = (e.ctrlKey && (k === 'r')) || (k === 'f5') || (e.ctrlKey && e.shiftKey && k === 'r') || (e.metaKey && k === 'r');
-      if (isCloseCombo || isDevTools || isRefresh) {
-        e.preventDefault(); e.stopPropagation();
-        recordViolation(isCloseCombo ? 'Attempted close (keyboard shortcut)'
-                      : isRefresh ? 'Attempted refresh (keyboard shortcut)'
-                      : 'Attempt to open developer tools');
-        return false;
-      }
-    }, {capture:true});
+    // E) Mute user-visible console AFTER probe planting
+    (function muteConsolePreQuiz(){
+      const noop=()=>{};
+      try{ console.log=noop; console.info=noop; console.warn=noop; console.error=noop; console.table=noop; console.trace=noop; console.debug=noop; }catch{}
+    })();
 
-    // beforeunload detection
-    trustedAddEvent(window, 'beforeunload', (e) => {
-      recordViolation('Attempted to close or reload window');
-      e.preventDefault(); e.returnValue = ''; return '';
-    }, {capture:true});
-
-    // ===== Watchdog via rAF
-    let lastPerf = ORIGINAL.performanceNow();
-    let rafId = null;
-    let fsGraceUntil = 0;
-    const CONFIG = {
-      fullscreenRequired: true,
-      fullscreenGraceMs: 3500,
-      perfGapMs: 2000,
-    };
-
-    function primaryWatchdogLoop(){
-      try{
-        // Focus
-        if (quizFrame.style.display === 'block') {
-          const focused = ORIGINAL.hasFocus();
-          if (!focused) recordViolation('Window lost focus');
-        }
-        // Visibility
-        const visState = document.visibilityState || (ORIGINAL.visibilityState ? ORIGINAL.visibilityState() : 'visible');
-        if (quizFrame.style.display === 'block' && visState !== 'visible') {
-          recordViolation('Tab not visible');
-        }
-        // Fullscreen with grace
-        if (quizFrame.style.display === 'block' && !ensureFullscreen()) {
-          if (!fsGraceUntil) fsGraceUntil = Date.now() + CONFIG.fullscreenGraceMs;
-          if (CONFIG.fullscreenRequired && Date.now() > fsGraceUntil) {
-            recordViolation('Fullscreen not active');
-          }
-        } else {
-          fsGraceUntil = 0;
-        }
-        // Perf drift
-        const now = ORIGINAL.performanceNow();
-        if ((now - lastPerf) > CONFIG.perfGapMs && quizFrame.style.display === 'block') {
-          recordViolation('Large performance gap (possible backgrounding)');
-        }
-        lastPerf = now;
-      }catch(err){
-        recordViolation('Watchdog error (possible tampering)');
-      }
-      rafId = ORIGINAL.requestAnimationFrame(primaryWatchdogLoop);
+    /* ===== Post-start: DevTools detectors (instant block, persistent) ===== */
+    const postStartIntervals=[];
+    function startPostStartDevtoolsDetectors(){
+      // DOM probe
+      (function postProbe(){
+        try{
+          const img=new Image();
+          Object.defineProperty(img,'id',{ get(){ if(hasStarted && !locked) hardBlock('DevTools opened'); return 'x'; }});
+          postStartIntervals.push(setInterval(()=>{ if(!hasStarted||locked) return; ORIGINAL.console.log(img); }, 1000));
+        }catch{}
+      })();
+      // Size gap
+      postStartIntervals.push(setInterval(()=>{
+        if(!hasStarted||locked) return;
+        const gapH=Math.abs(window.outerHeight-window.innerHeight);
+        const gapW=Math.abs(window.outerWidth-window.innerWidth);
+        if(gapH>160||gapW>160) hardBlock('DevTools detected');
+      }, 900));
+      // Timing anomaly
+      postStartIntervals.push(setInterval(()=>{
+        if(!hasStarted||locked) return;
+        const t0=ORIGINAL.perfNow(); Function.prototype.toString.call(function(){});
+        const dt=ORIGINAL.perfNow()-t0;
+        if(dt>175) hardBlock('DevTools timing anomaly');
+      }, 1500));
     }
 
+    /* ===== Post-start: Shortcuts & context menu ===== */
+    function wirePostStartShortcuts(){
+      on(window,'keydown',e=>{
+        if(!hasStarted||locked) return;
+        const k=(e.key||'').toLowerCase();
+        const dev = e.key==='F12' || (e.ctrlKey&&e.shiftKey&&['i','j','c','k'].includes(k)) || (e.ctrlKey&&k==='u') || (e.metaKey&&e.altKey&&k==='i');
+        const closeOrRefresh = (e.ctrlKey&&(k==='w'||k==='q'||k==='r')) || k==='f5' || (e.metaKey&&(k==='w'||k==='q'||k==='r'));
+        if(dev){ e.preventDefault(); e.stopPropagation(); return hardBlock('DevTools shortcut'); }
+        if(closeOrRefresh){ e.preventDefault(); e.stopPropagation(); return warnStrike('Close/Refresh shortcut'); }
+      }, {capture:true});
+    }
+    function wireContextMenuPostStart(){
+      on(document,'contextmenu',e=>{
+        if(!hasStarted||locked) return;
+        e.preventDefault(); e.stopPropagation(); warnStrike('Right-click/context menu'); return false;
+      }, {capture:true});
+    }
+
+    /* ===== Watchdog (rAF) ===== */
     function startWatchdogs(){
-      if (!rafId) rafId = ORIGINAL.requestAnimationFrame(primaryWatchdogLoop);
+      if(rafId) return;
+      lastPerf = ORIGINAL.perfNow(); // ensure fresh baseline
+      rafId = ORIGINAL.requestAnimationFrame(watchdogLoop);
     }
     function stopWatchdogs(){
-      try{ if (rafId && ORIGINAL.cancelAnimationFrame) ORIGINAL.cancelAnimationFrame(rafId); }catch{}
-      rafId = null;
+      try{ if(rafId && ORIGINAL.cancelAnimationFrame) ORIGINAL.cancelAnimationFrame(rafId); }catch{}
+      rafId=null;
     }
 
-    // Visibility + fullscreen change hooks
-    trustedAddEvent(document, 'visibilitychange', () => {
-      if (document.hidden && quizFrame.style.display === 'block') {
-        recordViolation('document became hidden');
-      }
-    }, {capture:true});
-    ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange'].forEach(evt => {
-      trustedAddEvent(document, evt, () => {
-        if (!ensureFullscreen() && quizFrame.style.display === 'block') {
-          if (!fsGraceUntil) fsGraceUntil = Date.now() + CONFIG.fullscreenGraceMs;
-          if (Date.now() > fsGraceUntil) recordViolation('Exited fullscreen');
-        }
-      }, {capture:true});
-    });
+    function inResumeGrace(){
+      if(resumeGraceFrames>0){ resumeGraceFrames--; return true; }
+      if(Date.now() < resumeGraceUntil) return true;
+      return false;
+    }
 
-    // ===== Tamper-evidence (lightweight, non-breaking)
-    (function fingerprintSelf(){
-      try {
-        const scripts = Array.from(document.getElementsByTagName('script'));
-        const mine = scripts.find(s => s.textContent && s.textContent.includes('Hardened Secure Quiz'));
-        if (!mine || !crypto?.subtle) return;
-        const text = mine.textContent.trim();
-        const enc = new TextEncoder();
-        crypto.subtle.digest('SHA-256', enc.encode(text)).then(buf => {
-          const hex = Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-          try { Object.defineProperty(window, '__quizScriptFingerprint', { value: hex, configurable:false, writable:false }); } catch {}
-        }).catch(()=>{});
-      } catch {}
-    })();
-    setInterval(() => {
+    function watchdogLoop(){
       try{
-        if (!window.__quizScriptFingerprint || !crypto?.subtle) return;
-        const scripts = Array.from(document.getElementsByTagName('script'));
-        const mine = scripts.find(s => s.textContent && s.textContent.includes('Hardened Secure Quiz'));
-        if (!mine) return;
-        const enc = new TextEncoder();
-        crypto.subtle.digest('SHA-256', enc.encode(mine.textContent.trim())).then(buf => {
-          const nowHex = Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-          if (nowHex !== window.__quizScriptFingerprint) {
-            recordViolation('Script fingerprint changed (possible tampering).');
+        if(locked || !hasStarted) return;
+
+        if(quizFrame.style.display !== 'block'){
+          rafId = ORIGINAL.requestAnimationFrame(watchdogLoop);
+          return;
+        }
+
+        // During immediate post-start/resume, skip checks
+        const inGrace = inResumeGrace();
+
+        // Focus
+        if(!inGrace){
+          try{ if(!ORIGINAL.hasFocus()) warnStrike('Lost focus'); }catch{ warnStrike('Focus check error'); }
+        }
+
+        // Visibility
+        if(!inGrace){
+          try{ const vis=document.visibilityState||ORIGINAL.visGet(); if(vis!=='visible') warnStrike('Tab hidden'); }catch{ warnStrike('Visibility check error'); }
+        }
+
+        // Fullscreen (with grace)
+        try{
+          if(!inFullscreen()){
+            if(!fsGraceUntil) fsGraceUntil = Date.now()+FULLSCREEN_GRACE_MS;
+            if(Date.now() > fsGraceUntil && !inGrace) warnStrike('Fullscreen exited');
+          } else {
+            fsGraceUntil = 0;
           }
-        }).catch(()=>{});
-      }catch{}
-    }, 5000);
+        }catch{ warnStrike('Fullscreen check error'); }
 
-    // ===== Defensive initializer
-    function initializeTamperWatch(){
-      try{
-        if (EventTarget.prototype.addEventListener !== ORIGINAL.addEventListener) {
-          try { EventTarget.prototype.addEventListener = ORIGINAL.addEventListener; } catch {}
-        }
-      }catch{}
-      // Start watchdogs when called
-      startWatchdogs();
+        // Performance drift
+        try{
+          const now=ORIGINAL.perfNow();
+          const dt=now - lastPerf;
+          // ignore huge gaps if in grace
+          if(!inGrace && dt > PERF_GAP_MS) warnStrike('Performance gap (backgrounded)');
+          lastPerf = now;
+        }catch{ warnStrike('Performance check error'); }
+
+      }catch{ warnStrike('Watchdog error'); }
+
+      rafId = ORIGINAL.requestAnimationFrame(watchdogLoop);
     }
 
-    // ===== Initial UI
-    showOverlay('Click Start to Begin Quiz');
+    /* ===== Page lifecycle ===== */
+    showOverlay('Click Start to Begin Quiz','Before starting, only opening DevTools will block you. After starting, policy applies.');
 
-    // ===== Cleanup on unload
-    trustedAddEvent(window, 'unload', () => {
+    on(window,'unload',()=>{
+      preQuizIntervals.forEach(id=>clearInterval(id));
+      postStartIntervals.forEach(id=>clearInterval(id));
       stopWatchdogs();
-      try { console.log('Final violations log:', violationLog); } catch {}
     });
 
   })();
